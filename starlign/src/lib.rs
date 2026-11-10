@@ -2,8 +2,9 @@
 //!
 //! The acoustic model is the ONNX MMS-300M forced aligner (31 Latin letters).
 //! CUDA is used when the ONNX Runtime CUDA provider loads; otherwise the same
-//! binary runs the model on CPU. The Viterbi and the anchor fit follow the
-//! algorithm in the MIT-licensed Storyteller aligner.
+//! binary runs the model on CPU. Between anchors, letters are matched by
+//! `monotonic_align`. Anchor fitting and the skip rules follow the
+//! MIT-licensed Storyteller aligner (libraries/align).
 
 #[macro_export]
 macro_rules! say {

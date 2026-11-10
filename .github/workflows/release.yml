@@ -1,5 +1,6 @@
 # Build Linux, Windows, and both Mac kinds from this source, then attach
-# the packs to a GitHub release. A push to main refreshes the alpha release.
+# the packs to a GitHub release. Linux runs the tests first. A failing test
+# blocks the release. A push to main refreshes the alpha release.
 # A tag named v* publishes that tag as a prerelease. Weights and CUDA stay out.
 name: Release
 
@@ -56,6 +57,10 @@ jobs:
         with:
           workspaces: starlign
           key: ${{ matrix.target }}
+      - name: Test
+        if: runner.os == 'Linux'
+        working-directory: starlign
+        run: cargo test --locked --target ${{ matrix.target }}
       - name: Build
         working-directory: starlign
         run: cargo build --release --locked --target ${{ matrix.target }}
