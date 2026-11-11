@@ -1,9 +1,11 @@
-//! Cut an audiobook without re-encoding.
+//! Cut an audiobook into chapter files.
 //!
 //! Overlay times use the decoded playback clock. For m4b, m4a, mp4, and mp3
-//! that clock matches the encoded frames, so a range is a run of those frames
-//! copied into a new file. The file starts on the first frame of the range.
-//! Callers shift clip times by that origin.
+//! that clock matches the encoded frames, so a range is a run of those frames.
+//! The file starts on the first frame of the range. Callers shift clip times
+//! by that origin. An AAC cut is then encoded as 64 kb/s mono MP3 when the
+//! caller asks for it, so older read-aloud players can seek. A whole-file
+//! copy is not re-encoded.
 //!
 //! [`Split::Chapters`] is one file per aligned chapter. [`Split::Seconds`] and
 //! [`Split::Parts`] cut the whole audiobook on a time grid. A span that crosses
@@ -17,7 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 /// How the written EPUB stores the audiobook.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,6 +246,7 @@ pub fn cut_range(
     end: f64,
     stem: &str,
     used: &mut HashSet<String>,
+    chapter_mp3: bool,
 ) -> Result<Vec<Piece>> {
     if end <= start {
         bail!("audio range is empty ({start:.3}s–{end:.3}s)");
@@ -259,21 +264,33 @@ pub fn cut_range(
         let local_lo = lo - file_start;
         let local_hi = hi - file_start;
         let cut = cache.cut(&track.source, local_lo, local_hi)?;
-        let name = unique_name(&stem, &cut.extension, used);
-        let path = cache.temp_path(&cut.extension);
-        std::fs::write(&path, &cut.bytes).with_context(|| format!("writing {}", path.display()))?;
+        let (bytes, duration_secs, media_type, extension) = if chapter_mp3 && cut.extension == "m4a"
+        {
+            let encoded = encode_mp3(&cut.bytes, cut.duration_secs)?;
+            (
+                encoded.bytes,
+                encoded.duration_secs,
+                "audio/mpeg".to_string(),
+                "mp3".to_string(),
+            )
+        } else {
+            (cut.bytes, cut.duration_secs, cut.media_type, cut.extension)
+        };
+        let name = unique_name(&stem, &extension, used);
+        let path = cache.temp_path(&extension);
+        std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
         let origin = file_start + cut.origin_secs;
         crate::say!(
             "split audio {name} {:.3}s–{:.3}s",
             origin,
-            origin + cut.duration_secs
+            origin + duration_secs
         );
         pieces.push(Piece {
             epub_name: name,
-            media_type: cut.media_type,
+            media_type,
             path,
             origin_secs: origin,
-            duration_secs: cut.duration_secs,
+            duration_secs,
         });
     }
     Ok(pieces)
@@ -443,6 +460,122 @@ fn cut_mp3(file: &mut File, index: &Mp3Index, start: f64, end: f64) -> Result<Cu
         media_type: "audio/mpeg".to_string(),
         extension: "mp3".to_string(),
     })
+}
+
+struct EncodedMp3 {
+    bytes: Vec<u8>,
+    duration_secs: f64,
+}
+
+fn encode_mp3(m4a: &[u8], cut_duration: f64) -> Result<EncodedMp3> {
+    let bin = ffmpeg_program()?;
+    let seq = NEXT_MP3.fetch_add(1, Ordering::Relaxed);
+    let stem = std::env::temp_dir().join(format!("starlign-mp3-{}-{seq}", std::process::id()));
+    let src = stem.with_extension("m4a");
+    let dst = stem.with_extension("mp3");
+    std::fs::write(&src, m4a).with_context(|| format!("writing {}", src.display()))?;
+    let encoded = Command::new(&bin)
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(&src)
+        .arg("-vn")
+        .arg("-ac")
+        .arg("1")
+        .arg("-c:a")
+        .arg("libmp3lame")
+        .arg("-b:a")
+        .arg("64k")
+        .arg(&dst)
+        .output();
+    let cleanup = |src: &Path, dst: &Path| {
+        let _ = std::fs::remove_file(src);
+        let _ = std::fs::remove_file(dst);
+    };
+    let output = match encoded {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup(&src, &dst);
+            return Err(err).with_context(|| format!("running {}", bin.display()));
+        }
+    };
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        cleanup(&src, &dst);
+        bail!("ffmpeg could not encode chapter audio as MP3: {err}");
+    }
+    let bytes = match std::fs::read(&dst) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            cleanup(&src, &dst);
+            return Err(err).with_context(|| format!("reading {}", dst.display()));
+        }
+    };
+    let duration = match File::open(&dst).and_then(|mut file| {
+        parse_mp3(&mut file)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{err:#}")))
+    }) {
+        Ok(index) => {
+            let frame_secs = index.samples_per_frame as f64 / index.rate as f64;
+            index.frames.len() as f64 * frame_secs
+        }
+        Err(err) => {
+            cleanup(&src, &dst);
+            return Err(err).context("reading the encoded MP3");
+        }
+    };
+    cleanup(&src, &dst);
+    if duration + 0.12 < cut_duration {
+        bail!("MP3 chapter is {duration:.3}s and the cut is {cut_duration:.3}s");
+    }
+    Ok(EncodedMp3 {
+        bytes,
+        duration_secs: duration,
+    })
+}
+
+static NEXT_MP3: AtomicU64 = AtomicU64::new(0);
+
+fn ffmpeg_program() -> Result<PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    if let Some(path) = FOUND.get_or_init(find_ffmpeg).clone() {
+        return Ok(path);
+    }
+    bail!("chapter audio is encoded as MP3, and ffmpeg with libmp3lame was not found")
+}
+
+fn find_ffmpeg() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            candidates.push(dir.join("ffmpeg"));
+        }
+    }
+    candidates.push(PathBuf::from("/usr/bin/ffmpeg"));
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if ffmpeg_encodes_mp3(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn ffmpeg_encodes_mp3(path: &Path) -> bool {
+    let Ok(output) = Command::new(path)
+        .arg("-hide_banner")
+        .arg("-encoders")
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.contains("libmp3lame")
 }
 
 fn read_span(file: &mut File, offsets: &[u64], sizes: &[u32]) -> Result<Vec<u8>> {
@@ -1329,7 +1462,16 @@ mod tests {
         };
         let mut cache = Cache::new();
         let mut used = HashSet::new();
-        let pieces = cut_range(&mut cache, &[track], 1.25, 2.10, "chapter", &mut used).unwrap();
+        let pieces = cut_range(
+            &mut cache,
+            &[track],
+            1.25,
+            2.10,
+            "chapter",
+            &mut used,
+            false,
+        )
+        .unwrap();
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].epub_name, "chapter.m4a");
         assert!(
@@ -1369,6 +1511,65 @@ mod tests {
     }
 
     #[test]
+    fn an_aac_chapter_encodes_as_mp3() {
+        let Some(bin) = find_ffmpeg() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("starlign-split-aac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("tone.m4a");
+        let made = Command::new(bin)
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("anullsrc=r=22050:cl=mono")
+            .arg("-t")
+            .arg("1")
+            .arg("-c:a")
+            .arg("aac")
+            .arg(&source)
+            .status();
+        if !matches!(made, Ok(status) if status.success()) || !source.is_file() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let track = Track {
+            source: source.clone(),
+            epub_name: "tone.m4a".into(),
+            media_type: "audio/mp4".into(),
+            start_sample: 0,
+            samples: SAMPLE_RATE as u64,
+        };
+        let pieces = cut_range(
+            &mut Cache::new(),
+            &[track],
+            0.1,
+            0.6,
+            "ch",
+            &mut HashSet::new(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(pieces[0].epub_name, "ch.mp3");
+        assert_eq!(pieces[0].media_type, "audio/mpeg");
+        assert!(pieces[0].duration_secs > 0.4, "{}", pieces[0].duration_secs);
+        let bytes = std::fs::read(pieces[0].path()).unwrap();
+        assert!(bytes.len() > 64, "{}", bytes.len());
+        assert!(
+            bytes.starts_with(b"ID3") || bytes[0] == 0xff,
+            "{}",
+            bytes[0]
+        );
+        drop(pieces);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_mp3_cut_keeps_the_frames_inside_the_range() {
         let dir = std::env::temp_dir().join(format!("starlign-split-mp3-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1399,6 +1600,7 @@ mod tests {
             frame_secs * 2.2,
             "ch",
             &mut HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(pieces[0].epub_name, "ch.mp3");
@@ -1433,6 +1635,7 @@ mod tests {
             0.5,
             "ch",
             &mut HashSet::new(),
+            false,
         )
         .unwrap_err();
         let text = format!("{err:#}");
@@ -1463,6 +1666,7 @@ mod tests {
             14.0,
             "part",
             &mut HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(pieces.len(), 1);

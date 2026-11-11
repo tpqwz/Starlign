@@ -217,6 +217,7 @@ impl Book {
         tracks: &[Track],
         total_seconds: f64,
         split: crate::split::Split,
+        chapter_mp3: bool,
     ) -> Result<()> {
         if let Some(parent) = output.parent() {
             if !parent.as_os_str().is_empty() {
@@ -238,6 +239,7 @@ impl Book {
                     split,
                     &mut kept,
                     &mut used_audio,
+                    chapter_mp3,
                 )?)
             }
             _ => None,
@@ -290,6 +292,7 @@ impl Book {
                     end,
                     &audio_stem(&chapter.href),
                     &mut used_audio,
+                    chapter_mp3,
                 )
                 .with_context(|| format!("splitting audio for {}", chapter.href))?;
                 if pieces.is_empty() {
@@ -411,6 +414,7 @@ fn prepare_timed_split(
     split: crate::split::Split,
     kept: &mut Vec<crate::split::Piece>,
     used: &mut HashSet<String>,
+    chapter_mp3: bool,
 ) -> Result<TimedSplit> {
     let (timeline_start, timeline_end) = timeline_bounds(tracks)?;
     let nominal = crate::split::nominal_slices(split, timeline_start, timeline_end)?;
@@ -431,7 +435,7 @@ fn prepare_timed_split(
             continue;
         }
         let stem = format!("audio-{n:0width$}", n = index + 1, width = width);
-        let pieces = crate::split::cut_range(cache, tracks, lo, hi, &stem, used)
+        let pieces = crate::split::cut_range(cache, tracks, lo, hi, &stem, used, chapter_mp3)
             .with_context(|| format!("splitting audio {stem} {lo:.3}s–{hi:.3}s"))?;
         if pieces.is_empty() {
             crate::say!("split {stem} {lo:.3}s–{hi:.3}s has no audio; skipping");
@@ -547,6 +551,7 @@ fn split_chapters_shifts_clips_onto_a_chapter_file() {
         &tracks,
         4.0,
         crate::split::Split::Chapters,
+        false,
     )
     .unwrap();
     let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
@@ -587,8 +592,15 @@ fn split_chapters_shifts_clips_onto_a_chapter_file() {
     assert!(opf.contains("Audio/chapter.m4a"), "{opf}");
     assert!(opf.contains("media-overlay"), "{opf}");
     let whole = dir.join("whole.epub");
-    book.write(&whole, &chapters, &tracks, 4.0, crate::split::Split::Whole)
-        .unwrap();
+    book.write(
+        &whole,
+        &chapters,
+        &tracks,
+        4.0,
+        crate::split::Split::Whole,
+        false,
+    )
+    .unwrap();
     let mut archive = ZipArchive::new(File::open(&whole).unwrap()).unwrap();
     let mut smil = String::new();
     archive
@@ -668,7 +680,8 @@ fn a_duration_split_keeps_a_crossing_span_on_the_file_where_it_starts() {
         (crate::split::Split::Parts(2), "parts.epub"),
     ] {
         let output = dir.join(name);
-        book.write(&output, &chapters, &tracks, 4.0, split).unwrap();
+        book.write(&output, &chapters, &tracks, 4.0, split, false)
+            .unwrap();
         let mut archive = ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut smil = String::new();
         archive
@@ -977,6 +990,7 @@ fn sentence_ranges(flat: &str) -> Vec<(usize, usize)> {
         .split_sentence_bound_indices()
         .filter(|(_, sentence)| sentence_has_words(sentence))
         .map(|(start, sentence)| (start, start + sentence.len()))
+        .flat_map(|(start, end)| split_on_blocks(flat, start, end))
         .collect();
     // UAX #29 ends a sentence at "C." and at "1." when the next word is
     // capitalized. Spoken initials and numbered steps are one phrase.
@@ -985,7 +999,13 @@ fn sentence_ranges(flat: &str) -> Vec<(usize, usize)> {
     while index < ranges.len() {
         let start = ranges[index].0;
         let mut end = ranges[index].1;
-        while index + 1 < ranges.len() && is_spoken_prefix(&flat[ranges[index].0..ranges[index].1])
+        while index + 1 < ranges.len()
+            && spoken_prefix_continues(
+                flat,
+                &flat[ranges[index].0..ranges[index].1],
+                ranges[index].1,
+                ranges[index + 1].0,
+            )
         {
             index += 1;
             end = ranges[index].1;
@@ -996,29 +1016,55 @@ fn sentence_ranges(flat: &str) -> Vec<(usize, usize)> {
     merged
 }
 
-/// A fragment the narrator says as part of the next words.
-/// "C." and "It is to C." both continue into "S. Lewis". "12." continues into the step.
-fn is_spoken_prefix(sentence: &str) -> bool {
-    let trimmed = sentence.trim();
-    let bytes = trimmed.as_bytes();
-    if bytes.is_empty() {
+/// A fragment the narrator says as part of the next words inside the same block.
+/// "C." and "It is to C." continue into "S. Lewis". "12." continues into the step.
+/// A paragraph break ends the sentence, so "—Bill W." does not swallow the next paragraph.
+fn spoken_prefix_continues(flat: &str, sentence: &str, end: usize, next_start: usize) -> bool {
+    if flat.get(end..next_start).unwrap_or("").contains('\n') {
         return false;
     }
-    if (2..=3).contains(&bytes.len())
-        && bytes[..bytes.len() - 1].iter().all(u8::is_ascii_digit)
-        && bytes[bytes.len() - 1] == b'.'
-    {
-        let number: u32 = trimmed[..trimmed.len() - 1].parse().unwrap_or(0);
-        return (1..=31).contains(&number);
+    is_numbered_step(sentence) || is_trailing_initial(sentence)
+}
+
+fn is_numbered_step(sentence: &str) -> bool {
+    let trimmed = sentence.trim();
+    let bytes = trimmed.as_bytes();
+    if !(2..=3).contains(&bytes.len()) {
+        return false;
     }
-    let chars: Vec<char> = trimmed.chars().collect();
-    if chars.len() >= 2
-        && chars[chars.len() - 1] == '.'
-        && chars[chars.len() - 2].is_ascii_uppercase()
-    {
-        return chars.len() == 2 || chars[chars.len() - 3].is_whitespace();
+    if !bytes[..bytes.len() - 1].iter().all(u8::is_ascii_digit) || bytes[bytes.len() - 1] != b'.' {
+        return false;
     }
-    false
+    let number: u32 = trimmed[..trimmed.len() - 1].parse().unwrap_or(0);
+    (1..=31).contains(&number)
+}
+
+fn is_trailing_initial(sentence: &str) -> bool {
+    let chars: Vec<char> = sentence.trim().chars().collect();
+    if chars.len() < 2
+        || chars[chars.len() - 1] != '.'
+        || !chars[chars.len() - 2].is_ascii_uppercase()
+    {
+        return false;
+    }
+    chars.len() == 2 || chars[chars.len() - 3].is_whitespace()
+}
+
+/// The sentence segmenter keeps "W. Here" together. A paragraph break still ends it.
+fn split_on_blocks(flat: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = start;
+    for (offset, _) in flat[start..end].match_indices('\n') {
+        let nl = start + offset;
+        if sentence_has_words(&flat[cursor..nl]) {
+            out.push((cursor, nl));
+        }
+        cursor = nl + 1;
+    }
+    if cursor < end && sentence_has_words(&flat[cursor..end]) {
+        out.push((cursor, end));
+    }
+    out
 }
 
 fn sentence_has_words(text: &str) -> bool {
@@ -2428,6 +2474,34 @@ mod tests {
     }
 
     #[test]
+    fn an_attribution_does_not_swallow_the_next_sentence() {
+        let xml = r##"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>t</title></head>
+<body>
+<p>—Bill W.</p>
+<p>Here is the heart of Twelve Step recovery—quit playing God.</p>
+<p>It is to C. S. Lewis that people pointed.</p>
+</body>
+</html>"##;
+        let (_out, text) = markup_xml(xml, "part0005.xhtml", false).unwrap();
+        let slices: Vec<&str> = text
+            .sentences
+            .iter()
+            .map(|sentence| &text.letters[sentence.letter_range.clone()])
+            .collect();
+        assert_eq!(
+            slices,
+            vec![
+                "billw",
+                "hereistheheartoftwelvesteprecoveryquitplayinggod",
+                "itistocslewisthatpeoplepointed",
+            ],
+            "{slices:?}"
+        );
+    }
+
+    #[test]
     fn a_year_is_spoken_in_the_letter_string() {
         let mut letters = String::new();
         push_letters("since 2003 when", &mut letters);
@@ -2611,6 +2685,7 @@ mod tests {
             }],
             1.0,
             crate::split::Split::Whole,
+            false,
         )
         .unwrap();
         let jar = std::env::var("EPUBCHECK_JAR").unwrap_or_default();

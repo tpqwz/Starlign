@@ -244,6 +244,7 @@ fn align_loaded(
         &timeline.tracks,
         timeline.duration_secs(),
         opts.split,
+        opts.split != crate::split::Split::Whole,
     )?;
     crate::say!("wrote {}", opts.output.display());
     if let Some(path) = &opts.reports {

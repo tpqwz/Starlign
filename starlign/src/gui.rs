@@ -843,7 +843,7 @@ impl AlignerWindow {
                     }
                     tip_button(
                         ui,
-                        "Chapter writes one audio file per aligned chapter. Older read-aloud and EPUB 3 players follow the highlight more reliably that way, which is how the early audio-ebooks were built. One long file often seeks or highlights poorly in those apps. Off keeps the whole audiobook in one file. Duration writes files of at most that many seconds, and the last file is the remainder. Equal parts divides the audiobook into that many files of the same length. A sentence that crosses a cut stays in the file where it starts. The audio is copied, not re-encoded.",
+                        "Chapter writes one audio file per aligned chapter. Older read-aloud and EPUB 3 players follow the highlight more reliably that way, which is how the early audio-ebooks were built. One long file often seeks or highlights poorly in those apps. Off keeps the whole audiobook in one file. Duration writes files of at most that many seconds, and the last file is the remainder. Equal parts divides the audiobook into that many files of the same length. A sentence that crosses a cut stays in the file where it starts. Off copies the audio. A split encodes each file as 64 kb/s mono MP3 through ffmpeg, which older players seek.",
                     );
                 });
                 if self.show_options {
