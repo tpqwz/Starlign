@@ -30,6 +30,8 @@ pub struct RunOptions {
     pub max_seconds: Option<f64>,
     pub reports: Option<PathBuf>,
     pub download: bool,
+    /// Download a static ffmpeg when a split needs MP3 and none is installed.
+    pub fetch_ffmpeg: bool,
     /// How the EPUB stores the audiobook. The default keeps each source file whole.
     pub split: Split,
 }
@@ -154,6 +156,9 @@ fn align_loaded(
     emissions: &Emissions,
     device: &str,
 ) -> Result<()> {
+    if opts.split != Split::Whole {
+        crate::split::ensure_ffmpeg(opts.fetch_ffmpeg)?;
+    }
     let book = Book::open(&opts.epub)?;
     let sources = book.chapters()?;
     let mut excluded: Vec<(i64, i64)> = Vec::new();

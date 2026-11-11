@@ -131,6 +131,8 @@ pub struct AlignerWindow {
     device: DeviceChoice,
     model: String,
     download: bool,
+    /// Download a static ffmpeg when a split needs it and none is installed.
+    fetch_ffmpeg: bool,
     drop_unread: bool,
     /// Chapter is the selected default. The other choices cut differently, or not at all.
     split_mode: SplitMode,
@@ -168,6 +170,7 @@ impl Default for AlignerWindow {
             device: DeviceChoice::Auto,
             model: String::new(),
             download: true,
+            fetch_ffmpeg: true,
             drop_unread: false,
             split_mode: SplitMode::Chapter,
             split_value: String::new(),
@@ -334,6 +337,7 @@ impl AlignerWindow {
             },
             if tune { self.model.as_str() } else { "" },
             self.download,
+            self.fetch_ffmpeg,
             tune && self.drop_unread,
             self.split_mode,
             &self.split_value,
@@ -763,12 +767,13 @@ impl AlignerWindow {
         let Ok(text) = std::fs::read_to_string(settings_path()) else {
             return;
         };
-        let (scale, advanced, options, paper, download) = decode_settings(&text);
+        let (scale, advanced, options, paper, download, fetch_ffmpeg) = decode_settings(&text);
         self.ui_scale = scale;
         self.show_advanced = advanced;
         self.show_options = options;
         self.paper = paper;
         self.download = download;
+        self.fetch_ffmpeg = fetch_ffmpeg;
     }
 
     fn save_settings(&self) {
@@ -784,6 +789,7 @@ impl AlignerWindow {
                 self.show_options,
                 self.paper,
                 self.download,
+                self.fetch_ffmpeg,
             ),
         );
     }
@@ -843,7 +849,7 @@ impl AlignerWindow {
                     }
                     tip_button(
                         ui,
-                        "Chapter writes one audio file per aligned chapter. Older read-aloud and EPUB 3 players follow the highlight more reliably that way, which is how the early audio-ebooks were built. One long file often seeks or highlights poorly in those apps. Off keeps the whole audiobook in one file. Duration writes files of at most that many seconds, and the last file is the remainder. Equal parts divides the audiobook into that many files of the same length. A sentence that crosses a cut stays in the file where it starts. Off copies the audio. A split encodes each file as 64 kb/s mono MP3 through ffmpeg, which older players seek.",
+                        "Chapter writes one audio file per aligned chapter. Older read-aloud and EPUB 3 players follow the highlight more reliably that way, which is how the early audio-ebooks were built. One long file often seeks or highlights poorly in those apps. Off keeps the whole audiobook in one file. Duration writes files of at most that many seconds, and the last file is the remainder. Equal parts divides the audiobook into that many files of the same length. A sentence that crosses a cut stays in the file where it starts. Off copies the audio. A split encodes each file as 64 kb/s mono MP3 through ffmpeg, which older players seek. If ffmpeg is missing, the download box fetches a static build into the cache. That build is not in the release zip.",
                     );
                 });
                 if self.show_options {
@@ -894,6 +900,20 @@ impl AlignerWindow {
                     tip_button(
                         ui,
                         "Downloads the MMS-300M fp16 ONNX weights when the model file is missing. The weights are CC-BY-NC 4.0.",
+                    );
+                });
+            }
+            if self.mode != Mode::Emit {
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut self.fetch_ffmpeg, "Download ffmpeg if it is missing")
+                        .changed()
+                    {
+                        self.save_settings();
+                    }
+                    tip_button(
+                        ui,
+                        "A split encodes each chapter as MP3. When ffmpeg with LAME is not already installed, this downloads a static build into the cache. It is not part of the release zip. ffmpeg is GPL-2.0-or-later. LAME is LGPL-2.0-or-later.",
                     );
                 });
             }
@@ -1078,22 +1098,25 @@ fn encode_settings(
     options: bool,
     paper: bool,
     download: bool,
+    fetch_ffmpeg: bool,
 ) -> String {
     format!(
-        "ui_scale {scale:.2}\nshow_advanced {}\nshow_options {}\ntheme {}\ndownload {}\n",
+        "ui_scale {scale:.2}\nshow_advanced {}\nshow_options {}\ntheme {}\ndownload {}\nffmpeg {}\n",
         if advanced { "true" } else { "false" },
         if options { "true" } else { "false" },
         if paper { "paper" } else { "dark" },
         if download { "true" } else { "false" },
+        if fetch_ffmpeg { "true" } else { "false" },
     )
 }
 
-fn decode_settings(text: &str) -> (f32, bool, bool, bool, bool) {
+fn decode_settings(text: &str) -> (f32, bool, bool, bool, bool, bool) {
     let mut scale = 1.0;
     let mut advanced = false;
     let mut options = false;
     let mut paper = false;
     let mut download = true;
+    let mut fetch_ffmpeg = true;
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         match (parts.next(), parts.next()) {
@@ -1110,10 +1133,12 @@ fn decode_settings(text: &str) -> (f32, bool, bool, bool, bool) {
             (Some("theme"), Some("dark")) => paper = false,
             (Some("download"), Some("true")) => download = true,
             (Some("download"), Some("false")) => download = false,
+            (Some("ffmpeg"), Some("true")) => fetch_ffmpeg = true,
+            (Some("ffmpeg"), Some("false")) => fetch_ffmpeg = false,
             _ => {}
         }
     }
-    (scale, advanced, options, paper, download)
+    (scale, advanced, options, paper, download, fetch_ffmpeg)
 }
 
 fn emissions_tip(mode: Mode) -> String {
@@ -1186,6 +1211,7 @@ fn plan_queue(
     device: DeviceChoice,
     model: &str,
     download: bool,
+    fetch_ffmpeg: bool,
     drop_unread: bool,
     split_mode: SplitMode,
     split_value: &str,
@@ -1302,6 +1328,9 @@ fn plan_queue(
             )?;
             if mode == Mode::Run && download {
                 args.push("--download".into());
+            }
+            if fetch_ffmpeg && split_mode != SplitMode::Off {
+                args.push("--fetch-ffmpeg".into());
             }
             planned.push(Planned {
                 row,
@@ -1692,23 +1721,27 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_ignore_unknown_lines() {
-        let text = encode_settings(1.25, true, false, true, false);
-        assert_eq!(decode_settings(&text), (1.25, true, false, true, false));
+        let text = encode_settings(1.25, true, false, true, false, false);
+        assert_eq!(
+            decode_settings(&text),
+            (1.25, true, false, true, false, false)
+        );
         assert!(text.contains("show_options false"), "{text}");
         assert!(text.contains("theme paper"), "{text}");
         assert!(text.contains("download false"), "{text}");
+        assert!(text.contains("ffmpeg false"), "{text}");
         assert_eq!(
             decode_settings("ui_scale 3\nshow_advanced false\nextra noise\n"),
-            (1.75, false, false, false, true)
+            (1.75, false, false, false, true, true)
         );
         assert_eq!(
             decode_settings("ui_scale 0.1\n"),
-            (0.75, false, false, false, true)
+            (0.75, false, false, false, true, true)
         );
-        assert_eq!(decode_settings(""), (1.0, false, false, false, true));
+        assert_eq!(decode_settings(""), (1.0, false, false, false, true, true));
         assert_eq!(
             decode_settings("show_options true\nui_scale 1.00\ntheme dark\ndownload false\n"),
-            (1.0, false, true, false, false)
+            (1.0, false, true, false, false, true)
         );
     }
 
@@ -1745,6 +1778,7 @@ mod tests {
             "",
             false,
             false,
+            false,
             SplitMode::Off,
             "",
             "",
@@ -1756,6 +1790,7 @@ mod tests {
         let window = AlignerWindow::default();
         assert!(window.split_mode == SplitMode::Chapter);
         assert!(window.download);
+        assert!(window.fetch_ffmpeg);
         assert!(!window.paper);
     }
 
@@ -1805,12 +1840,32 @@ mod tests {
             "",
             false,
             false,
+            false,
             SplitMode::Chapter,
             "",
             "",
         )
         .unwrap();
         assert!(split[0].args.iter().any(|arg| arg == "--split-chapters"));
+        assert!(!split[0].args.iter().any(|arg| arg == "--fetch-ffmpeg"));
+        let fetched = plan_queue(
+            Mode::Run,
+            &[pair(&audio, &epub)],
+            "",
+            false,
+            "3",
+            "",
+            DeviceChoice::Auto,
+            "",
+            false,
+            true,
+            false,
+            SplitMode::Chapter,
+            "",
+            "",
+        )
+        .unwrap();
+        assert!(fetched[0].args.iter().any(|arg| arg == "--fetch-ffmpeg"));
         let seconds = plan_queue(
             Mode::Align,
             &[pair(&audio, &epub)],
@@ -1820,6 +1875,7 @@ mod tests {
             "",
             DeviceChoice::Auto,
             "",
+            false,
             false,
             false,
             SplitMode::Duration,
@@ -1844,6 +1900,7 @@ mod tests {
             "",
             false,
             false,
+            false,
             SplitMode::Parts,
             "8",
             "",
@@ -1861,6 +1918,7 @@ mod tests {
             "",
             false,
             false,
+            false,
             SplitMode::Duration,
             "",
             "",
@@ -1875,6 +1933,7 @@ mod tests {
             "",
             DeviceChoice::Auto,
             "",
+            false,
             false,
             false,
             SplitMode::Parts,

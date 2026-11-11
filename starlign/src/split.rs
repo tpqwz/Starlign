@@ -539,18 +539,185 @@ fn encode_mp3(m4a: &[u8], cut_duration: f64) -> Result<EncodedMp3> {
 static NEXT_MP3: AtomicU64 = AtomicU64::new(0);
 
 fn ffmpeg_program() -> Result<PathBuf> {
-    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
-    if let Some(path) = FOUND.get_or_init(find_ffmpeg).clone() {
+    static FOUND: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = FOUND.get() {
+        return Ok(path.clone());
+    }
+    if let Some(path) = find_ffmpeg() {
+        let _ = FOUND.set(path.clone());
         return Ok(path);
     }
-    bail!("chapter audio is encoded as MP3, and ffmpeg with libmp3lame was not found")
+    bail!(
+        "chapter audio is encoded as MP3, and ffmpeg with libmp3lame was not found.\nPass --fetch-ffmpeg to download a static build. It is not part of the release.\nffmpeg is GPL-2.0-or-later. The build includes LAME, which is LGPL-2.0-or-later.\n{}",
+        ffmpeg_fetch_url(std::env::consts::OS, std::env::consts::ARCH)
+            .unwrap_or("no ffmpeg download is published for this system")
+    )
+}
+
+/// Download a static ffmpeg into the cache when the machine does not have one.
+/// A build already on PATH, or one already in the cache, is left where it is.
+pub fn ensure_ffmpeg(fetch: bool) -> Result<()> {
+    if find_ffmpeg().is_some() {
+        return Ok(());
+    }
+    if !fetch {
+        return ffmpeg_program().map(|_| ());
+    }
+    let url = ffmpeg_fetch_url(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
+        anyhow!(
+            "no ffmpeg download is published for {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    crate::say!(
+        "ffmpeg is GPL-2.0-or-later. This build includes LAME, which is LGPL-2.0-or-later."
+    );
+    crate::say!("downloading {url}");
+    let dest = ffmpeg_cache_path();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = std::env::temp_dir().join(format!("starlign-ffmpeg-{}-fetch", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let archive = tmp.join(if url.ends_with(".zip") {
+        "ffmpeg.zip"
+    } else {
+        "ffmpeg.tar.xz"
+    });
+    let status = Command::new("curl")
+        .args(["-L", "--fail", "--retry", "3", "-A", "starlign", "-o"])
+        .arg(&archive)
+        .arg(url)
+        .status()
+        .context("running curl")?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        bail!("ffmpeg download failed");
+    }
+    let unpacked = tmp.join("unpacked");
+    std::fs::create_dir_all(&unpacked)?;
+    let extracted = Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&unpacked)
+        .output()
+        .context("running tar")?;
+    if !extracted.status.success() {
+        let err = String::from_utf8_lossy(&extracted.stderr);
+        let _ = std::fs::remove_dir_all(&tmp);
+        bail!("could not unpack ffmpeg: {err}");
+    }
+    let Some(found) = find_named(&unpacked, ffmpeg_file_name()) else {
+        let _ = std::fs::remove_dir_all(&tmp);
+        bail!("the ffmpeg archive has no {} binary", ffmpeg_file_name());
+    };
+    std::fs::copy(&found, &dest).with_context(|| format!("saving {}", dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms)?;
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    if !ffmpeg_encodes_mp3(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        bail!("the downloaded ffmpeg does not include libmp3lame");
+    }
+    crate::say!("saved {}", dest.display());
+    Ok(())
+}
+
+fn ffmpeg_file_name() -> &'static str {
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
+}
+
+fn ffmpeg_cache_path() -> PathBuf {
+    let name = ffmpeg_file_name();
+    if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
+        if !cache.is_empty() {
+            return PathBuf::from(cache).join("starlign/ffmpeg").join(name);
+        }
+    }
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+            return PathBuf::from(local).join("starlign/ffmpeg").join(name);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if cfg!(target_os = "macos") {
+            return PathBuf::from(home)
+                .join("Library/Caches/starlign/ffmpeg")
+                .join(name);
+        }
+        return PathBuf::from(home)
+            .join(".cache/starlign/ffmpeg")
+            .join(name);
+    }
+    PathBuf::from(name)
+}
+
+/// Static GPL build for this operating system. The archive is not shipped.
+pub fn ffmpeg_fetch_url(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") => Some(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+        ),
+        ("linux", "aarch64") => Some(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
+        ),
+        ("windows", "x86_64") => Some(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        ),
+        ("windows", "aarch64") => Some(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-winarm64-gpl.zip",
+        ),
+        ("macos", "x86_64") => Some(
+            "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip",
+        ),
+        ("macos", "aarch64") => Some(
+            "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/snapshot/ffmpeg.zip",
+        ),
+        _ => None,
+    }
+}
+
+fn find_named(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().and_then(|item| item.to_str()) == Some(name) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn find_ffmpeg() -> Option<PathBuf> {
     let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("STARLIGN_FFMPEG") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(ffmpeg_cache_path());
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join("ffmpeg"));
+            candidates.push(dir.join(ffmpeg_file_name()));
         }
     }
     candidates.push(PathBuf::from("/usr/bin/ffmpeg"));
@@ -1508,6 +1675,17 @@ mod tests {
         drop(pieces);
         assert!(!temp.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ffmpeg_fetch_urls_name_a_gpl_build() {
+        let linux = ffmpeg_fetch_url("linux", "x86_64").unwrap();
+        assert!(linux.contains("linux64-gpl.tar.xz"), "{linux}");
+        let windows = ffmpeg_fetch_url("windows", "x86_64").unwrap();
+        assert!(windows.contains("win64-gpl.zip"), "{windows}");
+        let mac = ffmpeg_fetch_url("macos", "aarch64").unwrap();
+        assert!(mac.contains("macos/arm64"), "{mac}");
+        assert!(ffmpeg_fetch_url("freebsd", "x86_64").is_none());
     }
 
     #[test]
