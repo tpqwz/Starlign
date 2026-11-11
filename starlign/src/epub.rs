@@ -22,6 +22,9 @@ pub const READALOUD_CSS: &str = "\
   color: inherit;\n\
 }\n";
 
+/// Vocabulary URI Storyteller writes on content documents for `epub:type`.
+const STORYTELLER_PREFIX: &str = "storyteller: https://storyteller-platform.dev/docs/vocabulary";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpanKind {
     Matched,
@@ -747,6 +750,7 @@ fn par_text<'a>(smil: &'a str, id: &str) -> &'a str {
 pub fn markup_xml(xml: &str, id_prefix: &str, word_level: bool) -> Result<(String, ChapterText)> {
     let mut doc = Document::parse(xml)?;
     ensure_epub_namespace(&mut doc);
+    ensure_storyteller_prefix(&mut doc);
     let mut flat = String::new();
     let mut pieces = Vec::new();
     flatten(&doc, doc.root, &mut flat, &mut pieces);
@@ -1593,6 +1597,22 @@ fn ensure_epub_namespace(doc: &mut Document) {
     }
 }
 
+fn ensure_storyteller_prefix(doc: &mut Document) {
+    let current = doc.attr(doc.root, "epub:prefix").unwrap_or_default();
+    if current
+        .split_whitespace()
+        .any(|token| token == "storyteller:")
+    {
+        return;
+    }
+    let merged = if current.is_empty() {
+        STORYTELLER_PREFIX.to_string()
+    } else {
+        format!("{current} {STORYTELLER_PREFIX}")
+    };
+    doc.set_attr(doc.root, "epub:prefix", &merged);
+}
+
 fn ensure_stylesheet(doc: &mut Document) {
     let heads = doc.elements_named("head");
     let Some(&head) = heads.first() else { return };
@@ -1629,32 +1649,34 @@ fn rewrite_opf(
     if version.starts_with('2') {
         doc.set_attr(doc.root, "version", "3.0");
     }
+    let _ = (smils, total_seconds);
     let metadata = child_named(&doc, doc.root, "metadata").context("opf metadata")?;
     let manifest = child_named(&doc, doc.root, "manifest").context("opf manifest")?;
     drop_media_metas(&mut doc, metadata);
     set_modified(&mut doc, metadata);
     let mut meta_children = doc.children(metadata).to_vec();
-    for (index, chapter) in chapters.iter().enumerate() {
+    let mut overlay_centis = 0u64;
+    for chapter in chapters {
         if chapter.spans.is_empty() {
             continue;
         }
         let overlay_id = format!("{}_overlay", chapter_item_id(&doc, manifest, &chapter.href));
-        let duration = smils.get(index).map(|item| item.2).unwrap_or(0.0);
-        // smils only contains chapters that have spans, in the same order we pushed them.
-        let _ = duration;
+        let centis = (chapter_duration(&chapter.spans).max(0.0) * 100.0).round() as u64;
+        overlay_centis += centis;
         meta_children.push(meta_text(
             &mut doc,
             &[
                 ("property".into(), "media:duration".into()),
                 ("refines".into(), format!("#{overlay_id}")),
             ],
-            &format_clock(chapter_duration(&chapter.spans)),
+            &format_clock(centis as f64 / 100.0),
         ));
     }
+    // The publication clock is the sum of the overlay documents, in centiseconds.
     meta_children.push(meta_text(
         &mut doc,
         &[("property".into(), "media:duration".into())],
-        &format_clock(total_seconds),
+        &format_clock(overlay_centis as f64 / 100.0),
     ));
     meta_children.push(meta_text(
         &mut doc,
@@ -1976,7 +1998,11 @@ fn render_smil(
     let seq_id = format!("{}_overlay", href.rsplit('/').next().unwrap_or(href));
     let mut body = String::new();
     body.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-    body.push_str(r#"<smil xmlns="http://www.w3.org/ns/SMIL" xmlns:epub="http://www.idpf.org/2007/ops" version="3.0"><body>"#);
+    body.push_str(
+        r#"<smil xmlns="http://www.w3.org/ns/SMIL" xmlns:epub="http://www.idpf.org/2007/ops" epub:prefix=""#,
+    );
+    body.push_str(STORYTELLER_PREFIX);
+    body.push_str(r#"" version="3.0"><body>"#);
     body.push_str(&format!(
         r#"<seq id="{}" epub:textref="{}">"#,
         xml_escape(&seq_id),
@@ -2293,6 +2319,7 @@ mod tests {
             out.contains("epub:type=\"storyteller:sentence-span\""),
             "{out}"
         );
+        assert!(out.contains(STORYTELLER_PREFIX), "{out}");
         assert!(text.letters.contains("thisisthebest"), "{:?}", text.letters);
         assert!(
             text.letters.contains("quitplayinggod"),
@@ -2453,6 +2480,7 @@ mod tests {
         assert!(smil.contains("clipEnd=\"0:00:02.500\""), "{smil}");
         assert!(smil.contains("part.xhtml#part.xhtml-s0"), "{smil}");
         assert!(smil.contains("../Audio/book.m4b"), "{smil}");
+        assert!(smil.contains(STORYTELLER_PREFIX), "{smil}");
         assert!(!smil.contains("s\"/>"), "{smil}");
     }
 
@@ -2514,5 +2542,94 @@ mod tests {
         assert_eq!(smil.matches("#c.xhtml-s1").count(), 1, "{smil}");
         assert!(!smil.contains("audio-only"), "{smil}");
         assert!(!smil.contains("s\"/>"), "{smil}");
+    }
+
+    #[test]
+    fn epubcheck_accepts_a_marked_chapter() {
+        let dir = std::env::temp_dir().join(format!("starlign-epubcheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("book.m4a");
+        crate::split::write_marker_fixture(&audio);
+        let source = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>c</title></head><body><p>Hello.</p></body></html>"#;
+        let (xhtml, _) = markup_xml(source, "chapter.xhtml", false).unwrap();
+        assert!(xhtml.contains(STORYTELLER_PREFIX), "{xhtml}");
+        let mut files = BTreeMap::new();
+        files.insert(
+            "META-INF/container.xml".into(),
+            br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#
+                .to_vec(),
+        );
+        files.insert(
+            "content.opf".into(),
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid" xml:lang="en">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">id</dc:identifier>
+<dc:title>T</dc:title>
+<dc:language>en</dc:language>
+</metadata>
+<manifest>
+<item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+</manifest>
+<spine><itemref idref="c1"/></spine>
+</package>"#
+                .to_vec(),
+        );
+        files.insert(
+            "nav.xhtml".into(),
+            br#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>nav</title></head><body><nav epub:type="toc" id="toc"><ol><li><a href="chapter.xhtml">Chapter</a></li></ol></nav></body></html>"#
+                .to_vec(),
+        );
+        let book = Book {
+            opf_path: "content.opf".into(),
+            files,
+        };
+        let output = dir.join("out.epub");
+        book.write(
+            &output,
+            &[ChapterOutput {
+                href: "chapter.xhtml".into(),
+                zip_path: "chapter.xhtml".into(),
+                xhtml,
+                spans: vec![OverlaySpan {
+                    id: "chapter.xhtml-s0".into(),
+                    start: 0.0,
+                    end: 1.0,
+                    kind: SpanKind::Matched,
+                }],
+            }],
+            &[Track {
+                source: audio,
+                epub_name: "whole.m4a".into(),
+                media_type: "audio/mp4".into(),
+                start_sample: 0,
+                samples: 16_000,
+            }],
+            1.0,
+            crate::split::Split::Whole,
+        )
+        .unwrap();
+        let jar = std::env::var("EPUBCHECK_JAR").unwrap_or_default();
+        if jar.is_empty() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let run = std::process::Command::new("java")
+            .arg("-jar")
+            .arg(&jar)
+            .arg(&output)
+            .output()
+            .expect("java");
+        let report = String::from_utf8_lossy(&run.stdout);
+        let errors = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "epubcheck failed\n{report}\n{errors}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
 # Build Linux, Windows, and both Mac kinds from this source, then attach
-# the packs to a GitHub release. Linux runs the tests first. A failing test
-# blocks the release. A push to main refreshes the alpha release.
+# the packs to a GitHub release. Linux runs the tests, including EPUBCheck,
+# first. A failing test blocks the release. A push to main refreshes the alpha release.
 # A tag named v* publishes that tag as a prerelease. Weights and CUDA stay out.
 name: Release
 
@@ -57,9 +57,16 @@ jobs:
         with:
           workspaces: starlign
           key: ${{ matrix.target }}
+      - name: EPUBCheck
+        if: runner.os == 'Linux'
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/epubcheck.zip" https://github.com/w3c/epubcheck/releases/download/v5.4.0/epubcheck-5.4.0.zip
+          python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$RUNNER_TEMP/epubcheck.zip" "$RUNNER_TEMP/epubcheck"
       - name: Test
         if: runner.os == 'Linux'
         working-directory: starlign
+        env:
+          EPUBCHECK_JAR: ${{ runner.temp }}/epubcheck/epubcheck-5.4.0/epubcheck.jar
         run: cargo test --locked --target ${{ matrix.target }}
       - name: Build
         working-directory: starlign
