@@ -22,8 +22,8 @@ pub const READALOUD_CSS: &str = "\
   color: inherit;\n\
 }\n";
 
-/// Vocabulary URI Storyteller writes on content documents for `epub:type`.
-const STORYTELLER_PREFIX: &str = "storyteller: https://storyteller-platform.dev/docs/vocabulary";
+/// `epub:type` prefix written by this tool. The URI names starlign.
+const STARLIGN_PREFIX: &str = "starlign: https://github.com/tpqwz/starlign";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpanKind {
@@ -331,7 +331,7 @@ impl Book {
         } else {
             tracks
         };
-        let css_zip = join_path(&opf_dir, "Styles/storyteller-readaloud.css");
+        let css_zip = join_path(&opf_dir, "Styles/starlign-readaloud.css");
         let opf_xml = rewrite_opf(self, chapters, &smils, manifest_ref, total_seconds)?;
         replaced.insert(self.opf_path.clone(), opf_xml.into_bytes());
         replaced.insert(css_zip.clone(), READALOUD_CSS.as_bytes().to_vec());
@@ -750,7 +750,7 @@ fn par_text<'a>(smil: &'a str, id: &str) -> &'a str {
 pub fn markup_xml(xml: &str, id_prefix: &str, word_level: bool) -> Result<(String, ChapterText)> {
     let mut doc = Document::parse(xml)?;
     ensure_epub_namespace(&mut doc);
-    ensure_storyteller_prefix(&mut doc);
+    ensure_starlign_prefix(&mut doc);
     let mut flat = String::new();
     let mut pieces = Vec::new();
     flatten(&doc, doc.root, &mut flat, &mut pieces);
@@ -1314,7 +1314,7 @@ fn assign_sentence_ids(
                 }
                 *count += 1;
                 doc.set_attr(idx, "id", &id);
-                doc.set_attr(idx, "epub:type", "storyteller:sentence-span");
+                doc.set_attr(idx, "epub:type", "starlign:sentence-span");
                 doc.remove_attr(idx, "data-st-sent");
             }
         }
@@ -1328,7 +1328,7 @@ fn sentence_spans(doc: &Document) -> Vec<usize> {
     let mut out = Vec::new();
     let root = doc.root;
     doc.walk(root, &mut |doc, idx| {
-        if doc.attr(idx, "epub:type").as_deref() == Some("storyteller:sentence-span") {
+        if doc.attr(idx, "epub:type").as_deref() == Some("starlign:sentence-span") {
             out.push(idx);
         }
     });
@@ -1452,7 +1452,7 @@ fn number_words(doc: &mut Document, idx: usize, sentence_id: &str, count: &mut u
         let id = format!("{sentence_id}w{count}");
         *count += 1;
         doc.set_attr(idx, "id", &id);
-        doc.set_attr(idx, "epub:type", "storyteller:word-span");
+        doc.set_attr(idx, "epub:type", "starlign:word-span");
         doc.remove_attr(idx, "data-st-word");
     }
     for child in doc.children(idx).to_vec() {
@@ -1529,7 +1529,7 @@ fn visible_text(doc: &Document, idx: usize) -> String {
             NodeData::Comment(_) => {}
             NodeData::Element { .. } => {
                 if should_skip(doc, idx)
-                    && doc.attr(idx, "epub:type").as_deref() != Some("storyteller:sentence-span")
+                    && doc.attr(idx, "epub:type").as_deref() != Some("starlign:sentence-span")
                 {
                     return;
                 }
@@ -1597,18 +1597,15 @@ fn ensure_epub_namespace(doc: &mut Document) {
     }
 }
 
-fn ensure_storyteller_prefix(doc: &mut Document) {
+fn ensure_starlign_prefix(doc: &mut Document) {
     let current = doc.attr(doc.root, "epub:prefix").unwrap_or_default();
-    if current
-        .split_whitespace()
-        .any(|token| token == "storyteller:")
-    {
+    if current.split_whitespace().any(|token| token == "starlign:") {
         return;
     }
     let merged = if current.is_empty() {
-        STORYTELLER_PREFIX.to_string()
+        STARLIGN_PREFIX.to_string()
     } else {
-        format!("{current} {STORYTELLER_PREFIX}")
+        format!("{current} {STARLIGN_PREFIX}")
     };
     doc.set_attr(doc.root, "epub:prefix", &merged);
 }
@@ -1618,7 +1615,7 @@ fn ensure_stylesheet(doc: &mut Document) {
     let Some(&head) = heads.first() else { return };
     for child in doc.children(head) {
         if local_name(doc.name(*child)) == "link" {
-            if doc.attr(*child, "href").as_deref() == Some("Styles/storyteller-readaloud.css") {
+            if doc.attr(*child, "href").as_deref() == Some("Styles/starlign-readaloud.css") {
                 return;
             }
         }
@@ -1627,7 +1624,7 @@ fn ensure_stylesheet(doc: &mut Document) {
         "link",
         vec![
             ("rel".into(), "stylesheet".into()),
-            ("href".into(), "Styles/storyteller-readaloud.css".into()),
+            ("href".into(), "Styles/starlign-readaloud.css".into()),
             ("type".into(), "text/css".into()),
         ],
     );
@@ -1724,12 +1721,12 @@ fn rewrite_opf(
             ));
         }
     }
-    let css_href = "Styles/storyteller-readaloud.css";
+    let css_href = "Styles/starlign-readaloud.css";
     if find_item_by_href(&doc, &manifest_children, css_href).is_none() {
         manifest_children.push(doc.create_element(
             "item",
             vec![
-                ("id".into(), "storyteller_readaloud_styles".into()),
+                ("id".into(), "starlign_readaloud_styles".into()),
                 ("href".into(), css_href.into()),
                 ("media-type".into(), "text/css".into()),
             ],
@@ -2001,7 +1998,7 @@ fn render_smil(
     body.push_str(
         r#"<smil xmlns="http://www.w3.org/ns/SMIL" xmlns:epub="http://www.idpf.org/2007/ops" epub:prefix=""#,
     );
-    body.push_str(STORYTELLER_PREFIX);
+    body.push_str(STARLIGN_PREFIX);
     body.push_str(r#"" version="3.0"><body>"#);
     body.push_str(&format!(
         r#"<seq id="{}" epub:textref="{}">"#,
@@ -2127,10 +2124,10 @@ fn clip_ranges(tracks: &[Track], start: f64, end: f64) -> Vec<(usize, f64, f64)>
 
 fn kind_name(kind: SpanKind) -> &'static str {
     match kind {
-        SpanKind::Matched => "storyteller:matched",
-        SpanKind::Interpolated => "storyteller:interpolated",
-        SpanKind::Unmatched => "storyteller:unmatched",
-        SpanKind::AudioOnly => "storyteller:audio-only",
+        SpanKind::Matched => "starlign:matched",
+        SpanKind::Interpolated => "starlign:interpolated",
+        SpanKind::Unmatched => "starlign:unmatched",
+        SpanKind::AudioOnly => "starlign:audio-only",
     }
 }
 
@@ -2316,10 +2313,10 @@ mod tests {
         assert!(out.contains("id=\"part.xhtml-s1\""), "{out}");
         assert!(out.contains("<em>is</em>"), "{out}");
         assert!(
-            out.contains("epub:type=\"storyteller:sentence-span\""),
+            out.contains("epub:type=\"starlign:sentence-span\""),
             "{out}"
         );
-        assert!(out.contains(STORYTELLER_PREFIX), "{out}");
+        assert!(out.contains(STARLIGN_PREFIX), "{out}");
         assert!(text.letters.contains("thisisthebest"), "{:?}", text.letters);
         assert!(
             text.letters.contains("quitplayinggod"),
@@ -2425,7 +2422,7 @@ mod tests {
         let close = heading.find("OF UNCOVERY").unwrap();
         let region = &heading[..close];
         assert!(
-            !region.contains("storyteller:sentence-span"),
+            !region.contains("starlign:sentence-span"),
             "the heading was split:\n{out}"
         );
     }
@@ -2480,7 +2477,7 @@ mod tests {
         assert!(smil.contains("clipEnd=\"0:00:02.500\""), "{smil}");
         assert!(smil.contains("part.xhtml#part.xhtml-s0"), "{smil}");
         assert!(smil.contains("../Audio/book.m4b"), "{smil}");
-        assert!(smil.contains(STORYTELLER_PREFIX), "{smil}");
+        assert!(smil.contains(STARLIGN_PREFIX), "{smil}");
         assert!(!smil.contains("s\"/>"), "{smil}");
     }
 
@@ -2533,7 +2530,7 @@ mod tests {
         assert!(first.contains("clipBegin=\"0:00:00.000\""), "{first}");
         assert!(first.contains("clipEnd=\"0:00:06.000\""), "{first}");
         assert!(first.contains("../c.xhtml#c.xhtml-s0"), "{first}");
-        assert!(first.contains("storyteller:matched"), "{first}");
+        assert!(first.contains("starlign:matched"), "{first}");
         let second = par_text(&smil, "c.xhtml-s1-3");
         assert!(second.contains("clipBegin=\"0:00:06.000\""), "{second}");
         assert!(second.contains("clipEnd=\"0:00:07.250\""), "{second}");
@@ -2554,7 +2551,7 @@ mod tests {
         let source = r#"<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>c</title></head><body><p>Hello.</p></body></html>"#;
         let (xhtml, _) = markup_xml(source, "chapter.xhtml", false).unwrap();
-        assert!(xhtml.contains(STORYTELLER_PREFIX), "{xhtml}");
+        assert!(xhtml.contains(STARLIGN_PREFIX), "{xhtml}");
         let mut files = BTreeMap::new();
         files.insert(
             "META-INF/container.xml".into(),
