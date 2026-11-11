@@ -586,7 +586,7 @@ pub fn ensure_ffmpeg(fetch: bool) -> Result<()> {
     } else {
         "ffmpeg.tar.xz"
     });
-    let status = Command::new("curl")
+    let status = Command::new(host_tool("curl"))
         .args(["-L", "--fail", "--retry", "3", "-A", "starlign", "-o"])
         .arg(&archive)
         .arg(url)
@@ -598,13 +598,14 @@ pub fn ensure_ffmpeg(fetch: bool) -> Result<()> {
     }
     let unpacked = tmp.join("unpacked");
     std::fs::create_dir_all(&unpacked)?;
-    let extracted = Command::new("tar")
-        .arg("-xf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&unpacked)
-        .output()
-        .context("running tar")?;
+    let mut extract = Command::new(host_tool("tar"));
+    extract.arg("-xf").arg(&archive).arg("-C").arg(&unpacked);
+    if url.ends_with(".tar.xz") {
+        if let Some(xz) = working_xz() {
+            extract.arg(format!("--use-compress-program={}", xz.display()));
+        }
+    }
+    let extracted = extract.output().context("running tar")?;
     if !extracted.status.success() {
         let err = String::from_utf8_lossy(&extracted.stderr);
         let _ = std::fs::remove_dir_all(&tmp);
@@ -629,6 +630,29 @@ pub fn ensure_ffmpeg(fetch: bool) -> Result<()> {
     }
     crate::say!("saved {}", dest.display());
     Ok(())
+}
+
+/// Prefer `/usr/bin` so a broken copy earlier on `PATH` is not the one we run.
+fn host_tool(name: &str) -> PathBuf {
+    let usr = PathBuf::from("/usr/bin").join(name);
+    if usr.is_file() {
+        usr
+    } else {
+        PathBuf::from(name)
+    }
+}
+
+fn working_xz() -> Option<PathBuf> {
+    for candidate in ["/usr/bin/xz", "/bin/xz", "xz"] {
+        let path = PathBuf::from(candidate);
+        let Ok(output) = Command::new(&path).arg("--version").output() else {
+            continue;
+        };
+        if output.status.success() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn ffmpeg_file_name() -> &'static str {
@@ -1686,6 +1710,12 @@ mod tests {
         let mac = ffmpeg_fetch_url("macos", "aarch64").unwrap();
         assert!(mac.contains("macos/arm64"), "{mac}");
         assert!(ffmpeg_fetch_url("freebsd", "x86_64").is_none());
+        if Path::new("/usr/bin/tar").is_file() {
+            assert_eq!(host_tool("tar"), PathBuf::from("/usr/bin/tar"));
+        }
+        if Path::new("/usr/bin/xz").is_file() {
+            assert_eq!(working_xz().as_deref(), Some(Path::new("/usr/bin/xz")));
+        }
     }
 
     #[test]
