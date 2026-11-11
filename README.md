@@ -1,10 +1,10 @@
-# starlign
+# Starlign
 
-<img src="docs/window.png" width="720" alt="The starlign window. Split is Chapter, and the queue is empty.">
+<img src="docs/window.png" width="720" alt="The Starlign window. Split is Chapter, and the queue is empty.">
 
 This is alpha. The tool is early, and it may still shift.
 
-starlign lines up an audiobook with an EPUB and writes an EPUB 3 media overlay. With no split, the sound is put in as it was. A split makes each chapter file into MP3. ffmpeg is fetched when it is missing, if you ask. It is not in the release zip. ffmpeg is GPL. The build also holds LAME, which is LGPL.
+Starlign lines up an audiobook with an EPUB and writes an EPUB 3 media overlay. With no split, the sound is put in as it was. A split makes each chapter file into MP3. ffmpeg is fetched when it is missing, if you ask. It is not in the release zip. ffmpeg is GPL. The build also holds LAME, which is LGPL.
 
 One Rust tool does the work. A window opens when you start it. The same tool also runs from the shell as `run`, `emit`, or `align`.
 

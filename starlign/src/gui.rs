@@ -17,13 +17,13 @@ const AUDIO_EXTS: &[&str] = &["m4b", "m4a", "mp3", "flac", "ogg", "wav", "aac", 
 pub fn launch() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("starlign")
+            .with_title("Starlign")
             .with_inner_size([920.0, 860.0])
             .with_min_inner_size([640.0, 520.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "starlign",
+        "Starlign",
         options,
         Box::new(|cc| {
             let mut window = AlignerWindow::default();
@@ -525,7 +525,7 @@ impl AlignerWindow {
     fn header(&mut self, ui: &mut egui::Ui) {
         let busy = self.running();
         ui.horizontal(|ui| {
-            ui.heading("starlign");
+            ui.heading("Starlign");
             tip_button(
                 ui,
                 &format!(

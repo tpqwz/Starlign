@@ -1,4 +1,4 @@
-# Building starlign for macOS
+# Building Starlign for macOS
 
 A Linux machine cannot link this program for a Mac. The Apple SDK stays on a Mac. Nothing in this tree downloads one.
 

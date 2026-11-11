@@ -22,8 +22,8 @@ pub const READALOUD_CSS: &str = "\
   color: inherit;\n\
 }\n";
 
-/// `epub:type` prefix written by this tool. The URI names starlign.
-const STARLIGN_PREFIX: &str = "starlign: https://github.com/tpqwz/starlign";
+/// `epub:type` prefix written by this tool. The URI names the Starlign repository.
+const STARLIGN_PREFIX: &str = "starlign: https://github.com/tpqwz/Starlign";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpanKind {
